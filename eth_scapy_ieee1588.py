@@ -6,6 +6,44 @@ from scapy.fields import *
 # enable to debug dissectors
 conf.debug_dissector = 1
 
+class SixBytesField(Field):
+    def __init__(self, name, default):
+        Field.__init__(self, name, default, '!Q')
+
+    def addfield(self, pkt, s, val):
+        return s + struct.pack(self.fmt, self.i2m(pkt, val))[2:8]
+
+    def getfield(self, pkt, s):
+        return s[6:], self.m2i(pkt, struct.unpack(self.fmt, b'\x00\x00' + s[:6])[0])
+
+class ScaledNsField(Field):
+    def __init__(self, name, default):
+        Field.__init__(self, name, default, '!LQ')
+
+    def addfield(self, pkt, s, val):
+        mval = self.i2m(pkt, val)
+        return s + struct.pack(self.fmt, (mval >> 64) & 0xFFFFFFFF, mval & 0xFFFFFFFFFFFFFFFF)
+
+    def getfield(self, pkt, s):
+        (u, l) = struct.unpack(self.fmt, s[:12])
+        mval = (u << 64) + l
+        bits = 96
+        if (mval & (1 << (bits - 1))) != 0:
+            mval = mval - (1 << bits)        # compute negative value
+        return s[12:], self.m2i(pkt, mval)
+
+    def h2i(self, pkt, x):
+        """Convert human value to internal value"""
+        return int(x * 2**16)
+
+    def i2h(self, pkt, x):
+        """Convert internal value to human value"""
+        return x * 2**-16
+
+    def i2repr(self, pkt, x):
+        """Convert internal value to a nice representation"""
+        return repr(self.i2h(pkt, x)) + ' ns'
+
 class _PTPPacketBase(Packet):
     """ base class to be used among all PTP Packet definitions."""
     # use this dictionary to set default values for desired fields (mostly on subclasses
@@ -33,53 +71,41 @@ class _PTPPacketBase(Packet):
         Packet.init_fields(self)
         self._set_defaults()
 
+class PortIdentity(_PTPPacketBase):
+    fields_desc = [
+        XLongField('clockIdentity', 0), # TODO: enhance to support EUI-64 input format
+        XShortField('portNumber', 0),
+    ]
 
-class SixBytesField(Field):
-    def __init__(self, name, default):
-        Field.__init__(self, name, default, '!Q')
+    def extract_padding(self, p):
+        return '', p
 
-    def addfield(self, pkt, s, val):
-        return s + struct.pack(self.fmt, self.i2m(pkt, val))[2:8]
+class Timestamp(_PTPPacketBase):
+    fields_desc = [
+        SixBytesField('Sec', 0),
+        IntField('NanoSec', 0),
+    ]
 
-    def getfield(self, pkt, s):
-        return s[6:], self.m2i(pkt, struct.unpack(self.fmt, b'\x00\x00' + s[:6])[0])
-
-class ScaledNsField(Field):
-    def __init__(self, name, default):
-        Field.__init__(self, name, default, '!LQ')
-
-    def addfield(self, pkt, s, val):
-        mval = self.i2m(pkt, val)
-        return s + struct.pack(self.fmt, (m >> 8) & 0xFFFFFFFF, m & 0xFFFFFFFFFFFFFFFF)
-
-    def getfield(self, pkt, s):
-        (u, l) = struct.unpack(self.fmt, s[:12])
-        mval = (u << 64) + l
-        bits = 96
-        if (mval & (1 << (bits - 1))) != 0:
-            mval = mval - (1 << bits)        # compute negative value
-        return s[12:], self.m2i(pkt, mval)
-
-    def h2i(self, pkt, x):
-        """Convert human value to internal value"""
-        return int(x * 2**16)
-
-    def i2h(self, pkt, x):
-        """Convert internal value to human value"""
-        return x * 2**-16
-
-    def i2repr(self, pkt, x):
-        """Convert internal value to a nice representation"""
-        return repr(self.i2h(pkt, x)) + ' ns'
+    def extract_padding(self, p):
+        return '', p
 
 class ieee1588(_PTPPacketBase):
     MSG_TYPE_SYNC = 0
+    MSG_TYPE_DELAY_REQ = 1
     MSG_TYPE_PDELAY_REQ = 2
     MSG_TYPE_PDELAY_RESP = 3
+    MSG_TYPE_FOUR = 4
+    MSG_TYPE_FIVE = 5
+    MSG_TYPE_SIX = 6
+    MSG_TYPE_SEVEN = 7
     MSG_TYPE_FOLLOW_UP = 8
+    MSG_TYPE_DELAY_RESP = 9
     MSG_TYPE_PDELAY_RESP_FOLLOW_UP = 0xA
     MSG_TYPE_ANNOUNCE = 0xB
     MSG_TYPE_SIGNALING = 0xC
+    MSG_TYPE_MANAGEMENT = 0xD
+    MSG_TYPE_FOURTEEN = 0xE
+    MSG_TYPE_FIFTEEN = 0xF
 
     def guess_payload_class(self, payload):
         """ decode ieee1588 frame depending on its type."""
@@ -96,41 +122,75 @@ class ieee1588(_PTPPacketBase):
         if version == 2:
             if messageType == self.MSG_TYPE_SYNC:
                 return ieee1588v2_Sync
+            elif messageType == self.MSG_TYPE_DELAY_REQ:
+                return ieee1588v2_Delay_Req
+            elif messageType == self.MSG_TYPE_PDELAY_REQ:
+                return ieee1588v2_PDelay_Req
+            elif messageType == self.MSG_TYPE_PDELAY_RESP:
+                return ieee1588v2_PDelay_Resp
             elif messageType == self.MSG_TYPE_FOLLOW_UP:
                 return ieee1588v2_Follow_Up
+            elif messageType == self.MSG_TYPE_DELAY_RESP:
+                return ieee1588v2_Delay_Resp
+            elif messageType == self.MSG_TYPE_PDELAY_RESP_FOLLOW_UP:
+                return ieee1588v2_PDelay_Resp_Follow_Up
+            elif messageType == self.MSG_TYPE_SIGNALING:
+                return ieee1588v2_Signaling
+            elif messageType == self.MSG_TYPE_MANAGEMENT:
+                return ieee1588v2_Management
+
         return ieee1588v2_Header
 
 
 class ieee1588v2_Header(ieee1588):
     fields_desc = [
         BitEnumField('transportSpecific', 1, 4, {0: 'Default', 1: '802.1as'}),
-        BitEnumField('messageType', 0, 4, {0: 'Sync', 2: 'PDelay_Req', 3: 'PDelay_Resp', 8: 'Follow_Up', 
-            0xA: 'PDelay_Resp_Follow_Up', 0xB: 'Announce', 0xC: 'Signaling'}),
+        BitEnumField('messageType', 0, 4, {ieee1588.MSG_TYPE_SYNC: 'Sync', ieee1588.MSG_TYPE_PDELAY_REQ: 'PDelay_Req',
+            ieee1588.MSG_TYPE_PDELAY_RESP: 'PDelay_Resp', ieee1588.MSG_TYPE_FOLLOW_UP: 'Follow_Up',
+            ieee1588.MSG_TYPE_PDELAY_RESP_FOLLOW_UP: 'PDelay_Resp_Follow_Up', ieee1588.MSG_TYPE_ANNOUNCE: 'Announce',
+            ieee1588.MSG_TYPE_SIGNALING: 'Signaling'}),
         BitField('reserved0', 0, 4),
         BitField('versionPTP', 2, 4),
-        LenField('messageLength', 0, fmt='H'),
+        ShortField('messageLength', None),
         ByteField('domainNumber', 0),
         ByteField('reserved1', 0),
-        FlagsField('flags', 0, 16, ['PTP_LI_61', 'PTP_LI_59', 'PTP_UTC_REASONABLE', 'PTP_TIMESCALE', 'TIME_TRACEABLE',
+        FlagsField('flagField', 0, 16, ['PTP_LI_61', 'PTP_LI_59', 'PTP_UTC_REASONABLE', 'PTP_TIMESCALE', 'TIME_TRACEABLE',
             'FREQUENCY_TRACEABLE', 'UNDEF', 'UNDEF', 'PTP_ALTERNATE_MASTER', 'PTP_TWO_STEPS', 'PTP_UNICAST', 'UNDEF',
             'UNDEF', 'PTP_PROFILE_V1', 'PTP_PROFILE_V2', 'PTP_SECURITY']),
         LongField('correctionField', 0),
         IntField('reserved2', 0),
-        XLongField('ClockIdentity', 0),
-        XShortField('SourcePortId', 0),
+#        PacketField('sourcePortIdentity', '', PortIdentity),
+        XLongField('clockIdentity', 0), # TODO: enhance to support EUI-64 input format
+        XShortField('portNumber', 0),
         XShortField('sequenceId', 0),
         ByteField('controlField', 0),
         SignedByteField('logMessageInterval', 0)
     ]
 
+    def post_build(self, p, pay):
+        ml = self.messageLength
+        if ml is None:
+            ml = len(p)
+            p = p[:2] + struct.pack("!H", ml) + p[4:]
+        return p + pay
+
 
 class ieee1588v2_TLV_Header(ieee1588):
     fields_desc = [
         ShortEnumField('tlvType', 0, {3: 'Organisation extension', 8: 'Path trace'}),
-        ShortField('lengthField', 0),
+        ShortField('lengthField', None),
     ]
 
-class ieee1588v2_TLV_Follow_Up(ieee1588):
+    def post_build(self, p, pay):
+        lf = self.lengthField
+        if lf is None:
+            lf = len(p) - 4
+            p = p[:2] + struct.pack("!H", lf) + p[4:]
+        return p + pay
+
+
+class ieee1588v2_TLV_Follow_Up(ieee1588v2_TLV_Header):
+    _defaults = {'tlvType': 3}
     fields_desc = [
         ieee1588v2_TLV_Header,
         X3BytesField('organizationId', 0x0080C2),
@@ -141,29 +201,152 @@ class ieee1588v2_TLV_Follow_Up(ieee1588):
         SignedIntField('scaledLastGmFreqChange', 0),
     ]
 
-class ieee1588v2_Sync(ieee1588):
+class ieee1588v2_Sync(ieee1588v2_Header):
     name = 'Precision Time Protocol Sync'
 
     # default values specification
-    _defaults = {'messageId': ieee1588.MSG_TYPE_SYNC}
+    _defaults = {'messageType': ieee1588.MSG_TYPE_SYNC,
+                 'controlField': 0}
 
     fields_desc = [
         ieee1588v2_Header,
-        SixBytesField('OriginTimestampSec', 0),
-        IntField('OriginTimestampNanoSec', 0),
+#        PacketField('originTimestamp', '', Timestamp),
+        SixBytesField('originTimestampSec', 0),
+        IntField('originTimestampNanoSec', 0),
     ]
 
-class ieee1588v2_Follow_Up(ieee1588):
-    name = 'Precision Time Protocol Follow up'
+class ieee1588v2_Delay_Req(ieee1588v2_Header):
+    name = 'Precision Time Protocol Sync'
 
     # default values specification
-    _defaults = {'messageId': ieee1588.MSG_TYPE_FOLLOW_UP}
+    _defaults = {'messageType': ieee1588.MSG_TYPE_DELAY_REQ,
+                 'controlField': 1}
 
     fields_desc = [
         ieee1588v2_Header,
-        SixBytesField('PreciseOriginTimestampSec', 0),
-        IntField('PreciseOriginTimestampNanoSec', 0),
+#        PacketField('originTimestamp', None, Timestamp),
+        SixBytesField('originTimestampSec', 0),
+        IntField('originTimestampNanoSec', 0),
+    ]
+
+class ieee1588v2_PDelay_Req(ieee1588v2_Header):
+    name = 'Precision Time Protocol Peer Delay Request'
+
+    # default values specification
+    _defaults = {'messageType': ieee1588.MSG_TYPE_PDELAY_REQ,
+                 'controlField': 5}
+
+    fields_desc = [
+        ieee1588v2_Header,
+#        PacketField('originTimestamp', None, Timestamp),
+        SixBytesField('originTimestampSec', 0),
+        IntField('originTimestampNanoSec', 0),
+#        PacketField('reserved ', None, Timestamp),
+        SixBytesField('reservedSec', 0),
+        IntField('reservedNanoSec', 0),
+    ]
+
+class ieee1588v2_PDelay_Resp(ieee1588v2_Header):
+    name = 'Precision Time Protocol Peer Delay Response'
+
+    # default values specification
+    _defaults = {'messageType': ieee1588.MSG_TYPE_PDELAY_RESP,
+                 'controlField': 5}
+
+    fields_desc = [
+        ieee1588v2_Header,
+#        PacketField('requestReceiptTimestamp', None, Timestamp),
+        SixBytesField('requestReceiptTimestampSec', 0),
+        IntField('requestReceiptTimestampNanoSec', 0),
+#        PacketField('requestingPortIdentity', None, PortIdentity),
+        XLongField('requestingPortIdentityclockIdentity', 0), # TODO: enhance to support EUI-64 input format
+        XShortField('requestingPortIdentityportNumber', 0),
+    ]
+
+class ieee1588v2_Follow_Up(ieee1588v2_Header):
+    name = 'Precision Time Protocol Follow Up'
+
+    # default values specification
+    _defaults = {'messageType': ieee1588.MSG_TYPE_FOLLOW_UP,
+                 'controlField': 2}
+
+    fields_desc = [
+        ieee1588v2_Header,
+#        PacketField('preciseOriginTimestamp', None, Timestamp),
+        SixBytesField('preciseOriginTimestampSec', 0),
+        IntField('preciseOriginTimestampNanoSec', 0),
         PacketLenField("TLV", None, ieee1588v2_TLV_Follow_Up, length_from = lambda pkt:pkt.messageLength - 44),
     ]
 
-bind_layers(Ether, ieee1588, type=0x88F7)
+class ieee1588v2_Delay_Resp(ieee1588v2_Header):
+    name = 'Precision Time Protocol Delay Response'
+
+    # default values specification
+    _defaults = {'messageType': ieee1588.MSG_TYPE_DELAY_RESP,
+                 'controlField': 3}
+
+    fields_desc = [
+        ieee1588v2_Header,
+#        PacketField('receiveTimestamp', None, Timestamp),
+        SixBytesField('receiveTimestampSec', 0),
+        IntField('receiveTimestampNanoSec', 0),
+#        PacketField('requestingPortIdentity', None, PortIdentity),
+        XLongField('requestingPortIdentityclockIdentity', 0), # TODO: enhance to support EUI-64 input format
+        XShortField('requestingPortIdentityportNumber', 0),
+    ]
+
+class ieee1588v2_PDelay_Resp_Follow_Up(ieee1588v2_Header):
+    name = 'Precision Time Protocol Peer Delay Response Follow Up'
+
+    # default values specification
+    _defaults = {'messageType': ieee1588.MSG_TYPE_PDELAY_RESP_FOLLOW_UP,
+                 'controlField': 5}
+
+    fields_desc = [
+        ieee1588v2_Header,
+#        PacketField('responseOriginTimestamp', None, Timestamp),
+        SixBytesField('responseOriginTimestampSec', 0),
+        IntField('responseOriginTimestampNanoSec', 0),
+#        PacketField('requestingPortIdentity', None, PortIdentity),
+        XLongField('requestingPortIdentityclockIdentity', 0), # TODO: enhance to support EUI-64 input format
+        XShortField('requestingPortIdentityportNumber', 0),
+    ]
+
+class ieee1588v2_Signaling(ieee1588v2_Header):
+    name = 'Precision Time Protocol Signaling'
+
+    # default values specification
+    _defaults = {'messageType': ieee1588.MSG_TYPE_SIGNALING,
+                 'controlField': 5}
+
+    fields_desc = [
+        ieee1588v2_Header,
+#        PacketField('targetPortIdentity', None, PortIdentity),
+        XLongField('targetPortIdentityclockIdentity', 0), # TODO: enhance to support EUI-64 input format
+        XShortField('targetPortIdentityportNumber', 0),
+        PacketListField("TLV", None, ieee1588v2_TLV_Follow_Up, length_from = lambda pkt:pkt.messageLength - 44),
+    ]
+
+class ieee1588v2_Management(ieee1588v2_Header):
+    name = 'Precision Time Protocol Management'
+
+    # default values specification
+    _defaults = {'messageType': ieee1588.MSG_TYPE_MANAGEMENT,
+                 'controlField': 4,
+                 }
+
+    fields_desc = [
+        ieee1588v2_Header,
+#        PacketField('targetPortIdentity', None, PortIdentity),
+        XLongField('targetPortIdentityclockIdentity', 0), # TODO: enhance to support EUI-64 input format
+        XShortField('targetPortIdentityportNumber', 0),
+        ByteField('startingBoundaryHops', 0),
+        ByteField('boundaryHops', 0),
+        BitField('reserved0', None, 4),
+        BitField('actionField', 0, 4),
+        ByteField('reserved1', None),
+        PacketListField("TLV", None, ieee1588v2_TLV_Follow_Up, length_from = lambda pkt:pkt.messageLength - 48),
+    ]
+
+
+bind_layers(Ether, ieee1588, dst='01:80:c2:00:00:0e', type=0x88F7)
