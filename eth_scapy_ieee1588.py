@@ -11,10 +11,28 @@ class SixBytesField(Field):
         Field.__init__(self, name, default, '!Q')
 
     def addfield(self, pkt, s, val):
-        return s + struct.pack(self.fmt, self.i2m(pkt, val))[2:8]
+        return s + struct.pack(self.fmt, self.i2m(pkt, val))[2:]
 
     def getfield(self, pkt, s):
         return s[6:], self.m2i(pkt, struct.unpack(self.fmt, b'\x00\x00' + s[:6])[0])
+
+class TimestampField(Field):
+    def __init__(self, name, default):
+        Field.__init__(self, name, default, '!QL')
+
+    def addfield(self, pkt, s, val):
+        mval = self.i2m(pkt, val)
+        intpart, decpart = int(mval), mval - int(mval)
+        return s + struct.pack(self.fmt, intpart, int(decpart * 10**9))[2:]
+
+    def getfield(self, pkt, s):
+        (intpart, decpart) = struct.unpack(self.fmt, b'\x00\x00' + s[:10])
+        mval = intpart + decpart * 10**-9
+        return s[10:], self.m2i(pkt, mval)
+
+    def i2repr(self, pkt, x):
+        """Convert internal value to a nice representation"""
+        return repr(self.i2h(pkt, x)) + ' secs'
 
 class ScaledNsField(Field):
     def __init__(self, name, default):
@@ -75,15 +93,6 @@ class PortIdentity(_PTPPacketBase):
     fields_desc = [
         XLongField('clockIdentity', 0), # TODO: enhance to support EUI-64 input format
         XShortField('portNumber', 0),
-    ]
-
-    def extract_padding(self, p):
-        return '', p
-
-class Timestamp(_PTPPacketBase):
-    fields_desc = [
-        SixBytesField('Sec', 0),
-        IntField('NanoSec', 0),
     ]
 
     def extract_padding(self, p):
@@ -159,9 +168,7 @@ class ieee1588v2_Header(ieee1588):
             'UNDEF', 'PTP_PROFILE_V1', 'PTP_PROFILE_V2', 'PTP_SECURITY']),
         LongField('correctionField', 0),
         IntField('reserved2', 0),
-#        PacketField('sourcePortIdentity', '', PortIdentity),
-        XLongField('clockIdentity', 0), # TODO: enhance to support EUI-64 input format
-        XShortField('portNumber', 0),
+        PacketField('sourcePortIdentity', PortIdentity(), PortIdentity),
         XShortField('sequenceId', 0),
         ByteField('controlField', 0),
         SignedByteField('logMessageInterval', 0)
@@ -210,9 +217,7 @@ class ieee1588v2_Sync(ieee1588v2_Header):
 
     fields_desc = [
         ieee1588v2_Header,
-#        PacketField('originTimestamp', '', Timestamp),
-        SixBytesField('originTimestampSec', 0),
-        IntField('originTimestampNanoSec', 0),
+        TimestampField('originTimestamp', 0),
     ]
 
 class ieee1588v2_Delay_Req(ieee1588v2_Header):
@@ -224,9 +229,7 @@ class ieee1588v2_Delay_Req(ieee1588v2_Header):
 
     fields_desc = [
         ieee1588v2_Header,
-#        PacketField('originTimestamp', None, Timestamp),
-        SixBytesField('originTimestampSec', 0),
-        IntField('originTimestampNanoSec', 0),
+        TimestampField('originTimestamp', 0),
     ]
 
 class ieee1588v2_PDelay_Req(ieee1588v2_Header):
@@ -238,12 +241,8 @@ class ieee1588v2_PDelay_Req(ieee1588v2_Header):
 
     fields_desc = [
         ieee1588v2_Header,
-#        PacketField('originTimestamp', None, Timestamp),
-        SixBytesField('originTimestampSec', 0),
-        IntField('originTimestampNanoSec', 0),
-#        PacketField('reserved ', None, Timestamp),
-        SixBytesField('reservedSec', 0),
-        IntField('reservedNanoSec', 0),
+        TimestampField('originTimestamp', 0),
+        TimestampField('reserved ', 0),
     ]
 
 class ieee1588v2_PDelay_Resp(ieee1588v2_Header):
@@ -255,12 +254,8 @@ class ieee1588v2_PDelay_Resp(ieee1588v2_Header):
 
     fields_desc = [
         ieee1588v2_Header,
-#        PacketField('requestReceiptTimestamp', None, Timestamp),
-        SixBytesField('requestReceiptTimestampSec', 0),
-        IntField('requestReceiptTimestampNanoSec', 0),
-#        PacketField('requestingPortIdentity', None, PortIdentity),
-        XLongField('requestingPortIdentityclockIdentity', 0), # TODO: enhance to support EUI-64 input format
-        XShortField('requestingPortIdentityportNumber', 0),
+        TimestampField('requestReceiptTimestamp', 0),
+        PacketField('requestingPortIdentity', PortIdentity(), PortIdentity),
     ]
 
 class ieee1588v2_Follow_Up(ieee1588v2_Header):
@@ -272,9 +267,7 @@ class ieee1588v2_Follow_Up(ieee1588v2_Header):
 
     fields_desc = [
         ieee1588v2_Header,
-#        PacketField('preciseOriginTimestamp', None, Timestamp),
-        SixBytesField('preciseOriginTimestampSec', 0),
-        IntField('preciseOriginTimestampNanoSec', 0),
+        TimestampField('preciseOriginTimestamp', 0),
         PacketLenField("TLV", None, ieee1588v2_TLV_Follow_Up, length_from = lambda pkt:pkt.messageLength - 44),
     ]
 
@@ -287,12 +280,8 @@ class ieee1588v2_Delay_Resp(ieee1588v2_Header):
 
     fields_desc = [
         ieee1588v2_Header,
-#        PacketField('receiveTimestamp', None, Timestamp),
-        SixBytesField('receiveTimestampSec', 0),
-        IntField('receiveTimestampNanoSec', 0),
-#        PacketField('requestingPortIdentity', None, PortIdentity),
-        XLongField('requestingPortIdentityclockIdentity', 0), # TODO: enhance to support EUI-64 input format
-        XShortField('requestingPortIdentityportNumber', 0),
+        TimestampField('receiveTimestamp', 0),
+        PacketField('requestingPortIdentity', PortIdentity(), PortIdentity),
     ]
 
 class ieee1588v2_PDelay_Resp_Follow_Up(ieee1588v2_Header):
@@ -304,12 +293,8 @@ class ieee1588v2_PDelay_Resp_Follow_Up(ieee1588v2_Header):
 
     fields_desc = [
         ieee1588v2_Header,
-#        PacketField('responseOriginTimestamp', None, Timestamp),
-        SixBytesField('responseOriginTimestampSec', 0),
-        IntField('responseOriginTimestampNanoSec', 0),
-#        PacketField('requestingPortIdentity', None, PortIdentity),
-        XLongField('requestingPortIdentityclockIdentity', 0), # TODO: enhance to support EUI-64 input format
-        XShortField('requestingPortIdentityportNumber', 0),
+        TimestampField('responseOriginTimestamp', 0),
+        PacketField('requestingPortIdentity', PortIdentity(), PortIdentity),
     ]
 
 class ieee1588v2_Signaling(ieee1588v2_Header):
@@ -321,9 +306,7 @@ class ieee1588v2_Signaling(ieee1588v2_Header):
 
     fields_desc = [
         ieee1588v2_Header,
-#        PacketField('targetPortIdentity', None, PortIdentity),
-        XLongField('targetPortIdentityclockIdentity', 0), # TODO: enhance to support EUI-64 input format
-        XShortField('targetPortIdentityportNumber', 0),
+        PacketField('targetPortIdentity', PortIdentity(), PortIdentity),
         PacketListField("TLV", None, ieee1588v2_TLV_Follow_Up, length_from = lambda pkt:pkt.messageLength - 44),
     ]
 
@@ -337,9 +320,7 @@ class ieee1588v2_Management(ieee1588v2_Header):
 
     fields_desc = [
         ieee1588v2_Header,
-#        PacketField('targetPortIdentity', None, PortIdentity),
-        XLongField('targetPortIdentityclockIdentity', 0), # TODO: enhance to support EUI-64 input format
-        XShortField('targetPortIdentityportNumber', 0),
+        PacketField('targetPortIdentity', PortIdentity(), PortIdentity),
         ByteField('startingBoundaryHops', 0),
         ByteField('boundaryHops', 0),
         BitField('reserved0', None, 4),
